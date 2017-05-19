@@ -1,0 +1,140 @@
+---
+title: "Weight Lifting Recognition"
+author: "Roberto Garuti"
+date: "May 16, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Human Activity Recognition - Weight Lifting
+
+##Introduction
+
+The purpose of this research is to design a method to recognize the way an exercise is performed. The focus is therefore on the quality of a physical activity. Six young participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience, who could easily simulate the mistakes in a safe and controlled manner by using a relatively light dumbbell (1.25kg). Sensors were mounted in the users' glove, armband, lumbar belt and dumbbell. Each sensor recorded features on the Euler angles (roll, pitch and yaw), as well as the raw accelerometer, gyroscope and magnetometer readings. Additional feature were calculated: mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness, generating in total 96 derived feature sets.
+
+The data used in this research has been downloaded from: http://groupware.les.inf.puc-rio.br/har#ixzz4hIdtJOTy
+
+##Data Splitting
+
+The training file has been divided in a training dataset and a validation dataset with a 70-30 split. Since the dataset is ordered by Class, in order to avoid imbalances in the outcome variable, the split can't be done with K-fold splitting but it's done with random sampling.
+
+```{r datasplit, results='hide'}
+library("caret", lib.loc="~/R/win-library/3.3")
+library("lattice", lib.loc="~/R/win-library/3.3")
+library("ggplot2", lib.loc="~/R/win-library/3.3")
+library("randomForest", lib.loc="~/R/win-library/3.3")
+library("gbm", lib.loc="~/R/win-library/3.3")
+traindata <- read.csv("pml-training.csv")
+testdata <- read.csv("pml-testing.csv")
+set.seed(666)
+valindex <- createDataPartition(traindata$classe, p = 0.70,list=FALSE)
+trainingdata <- traindata[valindex,]
+validationdata <- traindata[-valindex,]
+```
+
+##Exploratory Analysis and Data Cleaning
+
+To confirm that the training dataset is not unbalanced regarding Class, the total number of records in each group is calculated. More records are present for Class A but the difference is tolerable and will not jeopardize the results of the model.
+
+```{r explor}
+table(trainingdata$classe)
+```
+
+Some columns have NAs or "" for the vast majority of records. 13457 is identified as the threshold so every variable that has more than 13457 NAs or "" is eliminated from the dataset. Then the first 7 columns are eliminated since they refer to features like name of the subject or timestamp, that have no explanatory power. Finally the columns whose values are stored as integer are converted to numeric values. In order to keep the datasets consistent, the same columns are then eliminated or converted in the validation and testing datasets.
+
+```{r clean1}
+#eliminate columns that are mostly NAs
+apply(is.na(trainingdata),2,sum)
+notNA <- apply(is.na(trainingdata),2,sum)>13457
+trainingdata1 <- trainingdata[,!notNA]
+```
+```{r clean2, results='hide'}
+#eliminate columns that are mostly ""
+apply(trainingdata1=="",2,sum)
+notNA2 <- apply(trainingdata1=="",2,sum)>13457
+trainingdata2 <- trainingdata1[,!notNA2]
+#eliminate columns that refer to user or time measurement and have no explanatory power
+trainingdata3 <- trainingdata2[,8:60]
+str(trainingdata3)
+#Convert integer variables to numeric
+trainingdata3[,c(4,8:13,17,21:26,30,34:38,43,47:50)] <- sapply(trainingdata3[,
+              c(4,8:13,17,21:26,30,34:38,43,47:50)],as.numeric)
+#Repeat same steps for validation and testing data sets
+validationdata1 <- validationdata[,!notNA]
+testdata1 <- testdata[,!notNA]
+validationdata2 <- validationdata1[,!notNA2]
+testdata2 <- testdata1[,!notNA2]
+validationdata3 <- validationdata2[,8:60]
+testdata3 <- testdata2[,8:60]
+validationdata3[,c(4,8:13,17,21:26,30,34:38,43,47:50)] <- sapply(validationdata3[,
+              c(4,8:13,17,21:26,30,34:38,43,47:50)],as.numeric)
+testdata3[,c(4,8:13,17,21:26,30,34:38,43,47:50)] <- sapply(testdata3[,
+              c(4,8:13,17,21:26,30,34:38,43,47:50)],as.numeric)
+```
+
+The selected explanatory variables have been compared to each other and to the outcome Class in different plots. Due to the high number of variables, it was impossible to plot them all in the same graph, so they were divided in groups of closely related variables. For example, the first plot included the roll, pitch and yaw of the belt sensor mounted at the hips. This is the most interesting plot since it shows the different pattern for Class E, which is the class of exercises performed by throwing the hips to the front. No other plot showed any particular pattern between an explanatory variable and Class so they have been omitted from this report. 
+
+```{r plot1}
+pairs(trainingdata3[,c(1:3,53)])
+```
+```{r plot2, fig.show='hide'}
+pairs(trainingdata3[,c(4:10,53)])
+pairs(trainingdata3[,c(11:13,53)])
+pairs(trainingdata3[,c(14:16,53)])
+pairs(trainingdata3[,c(17:23,53)])
+pairs(trainingdata3[,c(24:26,53)])
+pairs(trainingdata3[,c(27:29,53)])
+pairs(trainingdata3[,c(30:36,53)])
+pairs(trainingdata3[,c(37:39,53)])
+pairs(trainingdata3[,c(40:42,53)])
+pairs(trainingdata3[,c(43:49,53)])
+pairs(trainingdata3[,c(50:53)])
+```
+
+##Model Building
+
+###1. Random Forest
+
+The first model built is with random forest, due to the noise in the sensor data. Random forest is a typical choice for such problems. 10-fold cross validation is used to fine tune the model, which means determining the ideal value for mtry, which is the number of variable that are randomly selected at every step of the algorithm. A typical starting value for mtry is floor(sqrt(ncol(x))), where ncol is the number of explanatory variables, in this case 52. The formula gives mtry = 7, so the search will be done with mtry in the range [1; 15]. From the results below, the best performance is achieved with mtry = 9, although most of the values are very close to each other so the differences might be due more to noise than the effect of mtry.
+
+```{r RF, cache=TRUE}
+tunegrid <- expand.grid(.mtry=c(1:15))
+set.seed(999)
+RFmodel <- train(classe~.,data=trainingdata3,method="rf",verbose = FALSE,
+                 trControl=trainControl(method="cv",number=10),tuneGrid=tunegrid)
+print(RFmodel)
+```
+
+The accuracy of the model, calculated on the validation data is 99.47%. The most important variable is by far the roll measured by the sensor at the belt, followed by the yaw at the belt, the pitch of the forearm and the z value of the dumbell. We can say that the greatest indication of how the exercise was done is the position of the hips: if the hips are rotated too much or too little it is likely a sign that a mistake is being made. Also it is an expected result that the pitch of the forearm is another strong indicator since the dumbell curl requires to move the forearm up and down, which is exactly the type of rotation measured by the pitch.
+
+```{r RFacc, cache=TRUE}
+RFpred <- predict(RFmodel,validationdata3)
+confusionMatrix(RFpred, validationdata3$classe)
+varImp(RFmodel)
+```
+
+###2. Boosting
+
+Another model is created using Generalized Boosting Method with 10-fold cross validation. In this case the accuracy is 96.14%. The most important variables are similar as for the random forest model but the roll at the belt is even more important compared to the rest. Also the yaw at the belt is less important than the pitch of the forearm.  
+
+```{r GBM, cache=TRUE}
+set.seed(999)
+Boostmodel <- train(classe~.,data=trainingdata3,method="gbm",verbose = FALSE,
+                 trControl=trainControl(method="cv",number=10))
+print(Boostmodel)
+Boostpred <- predict(Boostmodel,validationdata3)
+confusionMatrix(Boostpred, validationdata3$classe)
+varImp(Boostmodel)
+```
+
+##Final Predictions
+
+The random forest model is used to perform prediction on the testing data given the better performances obtained on the validation dataset and all the predicted outcomes turned out to be correct.
+
+```{r predict}
+finalpred <- predict(RFmodel,testdata3)
+print(finalpred)
+```
