@@ -263,7 +263,7 @@ omitted from this report.
 
     pairs(trainingdata3[,c(1:3,53)])
 
-![](Practical-Machine-Learning/plot1-1.png)
+![](Practical-Machine-Learning/blob/master/plot1-1.png)
 
     pairs(trainingdata3[,c(4:10,53)])
 
